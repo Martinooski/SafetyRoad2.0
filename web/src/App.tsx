@@ -17,8 +17,8 @@ const save = (key: string, value: unknown) => {
     /* sin almacenamiento disponible */
   }
 };
-const CARTO_DARK = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png";
-const CARTO_ATTR = "&copy; OpenStreetMap contributors &copy; CARTO";
+const OSM_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const OSM_ATTR = "&copy; OpenStreetMap contributors";
 const SENSITIVITY_MS2: Record<string, number> = { Alta: 20, Media: 30, Baja: 40 };
 
 type Severity = "LEVE" | "MODERADA" | "GRAVE";
@@ -254,7 +254,7 @@ function MapArtwork({
         },
       ).addTo(map);
     } else {
-      L.tileLayer(CARTO_DARK, { attribution: CARTO_ATTR, maxZoom: 19, subdomains: "abcd" }).addTo(map);
+      L.tileLayer(OSM_URL, { attribution: OSM_ATTR, maxZoom: 19, className: "osm-dark" }).addTo(map);
     }
     L.control.zoom({ position: "bottomright" }).addTo(map);
 
@@ -763,7 +763,7 @@ function LocationPicker({ onSelect }: { onSelect: (location: SelectedLocation) =
         },
       ).addTo(map);
     } else {
-      L.tileLayer(CARTO_DARK, { attribution: CARTO_ATTR, maxZoom: 19, subdomains: "abcd" }).addTo(map);
+      L.tileLayer(OSM_URL, { attribution: OSM_ATTR, maxZoom: 19, className: "osm-dark" }).addTo(map);
     }
 
     const pickerIcon = L.divIcon({
