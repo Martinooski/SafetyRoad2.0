@@ -1,0 +1,6 @@
+node_modules/
+web/dist/
+app/src/main/assets/www/
+.gradle/
+build/
+local.properties
