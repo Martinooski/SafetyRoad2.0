@@ -19,6 +19,76 @@ const save = (key: string, value: unknown) => {
 };
 const OSM_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_ATTR = "&copy; OpenStreetMap contributors";
+// Estado de cámara del mapa principal: sobrevive a los cambios de pantalla
+let savedView: { center: L.LatLngTuple; zoom: number } | null = null;
+let lastUserLocation: L.LatLngTuple | null = null;
+let didInitialFly = false;
+let userMovedMap = false;
+const DEFAULT_CENTER: L.LatLngTuple = [-29.9533, -71.3395];
+
+const ROAD_TYPES =
+  "motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link|service|pedestrian";
+
+async function getJson<T>(url: string, ms = 9000): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(String(res.status));
+    return (await res.json()) as T;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+const shortName = (n: string) =>
+  n.replace(/^Avenida /i, "Av. ").replace(/^Calle /i, "").replace(/^Pasaje /i, "Pje. ");
+
+// Convierte coordenadas en "Calle A con Calle B" (o calle + número) usando datos de OpenStreetMap
+async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
+  const kx = 111320 * Math.cos((lat * Math.PI) / 180);
+  const dist = (p: { lat: number; lon: number }) =>
+    Math.hypot((p.lon - lng) * kx, (p.lat - lat) * 110540);
+
+  const roads = (async () => {
+    const q = `[out:json][timeout:8];way(around:40,${lat},${lng})["highway"~"^(${ROAD_TYPES})$"]["name"];out geom;`;
+    const data = await getJson<{
+      elements?: Array<{ tags?: { name?: string }; geometry?: Array<{ lat: number; lon: number }> }>;
+    }>(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(q)}`);
+    const best = new Map<string, number>();
+    for (const el of data.elements ?? []) {
+      const name = el.tags?.name;
+      if (!name || !el.geometry?.length) continue;
+      const d = Math.min(...el.geometry.map(dist));
+      if (d < (best.get(name) ?? Infinity)) best.set(name, d);
+    }
+    return [...best.entries()].sort((a, b) => a[1] - b[1]).map(([n]) => shortName(n));
+  })();
+
+  const place = getJson<{
+    address?: Record<string, string>;
+    display_name?: string;
+  }>(
+    `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&addressdetails=1&accept-language=es&lat=${lat}&lon=${lng}`,
+  );
+
+  const [r, p] = await Promise.allSettled([roads, place]);
+  const names = r.status === "fulfilled" ? r.value : [];
+  if (names.length >= 2) return `${names[0]} con ${names[1]}`;
+
+  const a = p.status === "fulfilled" ? p.value.address : undefined;
+  const area = a?.suburb || a?.neighbourhood || a?.city_district || a?.city || a?.town || a?.village;
+  const road = names[0] || (a?.road ? shortName(a.road) : "");
+  if (road) {
+    const num = a?.house_number ? ` ${a.house_number}` : "";
+    return `${road}${num}${area ? `, ${area}` : ""}`;
+  }
+  if (p.status === "fulfilled" && p.value.display_name) {
+    return p.value.display_name.split(",").slice(0, 3).join(",").trim();
+  }
+  return null;
+}
+
 const SENSITIVITY_MS2: Record<string, number> = { Alta: 20, Media: 30, Baja: 40 };
 
 type Severity = "LEVE" | "MODERADA" | "GRAVE";
@@ -216,10 +286,12 @@ function MapArtwork({
   incidents,
   radius,
   onIncident,
+  main = false,
 }: {
   incidents: Incident[];
   radius: number;
   onIncident: (i: Incident) => void;
+  main?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -227,7 +299,7 @@ function MapArtwork({
   const userMarkerRef = useRef<L.Marker | null>(null);
   const zoneCircleRef = useRef<L.Circle | null>(null);
   const onIncidentRef = useRef(onIncident);
-  const [userLocation, setUserLocation] = useState<L.LatLngExpression>([-29.9533, -71.3395]);
+  const [userLocation, setUserLocation] = useState<L.LatLngExpression>(lastUserLocation ?? DEFAULT_CENTER);
   const [locationState, setLocationState] = useState<"buscando" | "gps" | "referencia">("buscando");
   const [mapProviderReady, setMapProviderReady] = useState(true);
 
@@ -236,9 +308,10 @@ function MapArtwork({
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
+    const start = lastUserLocation ?? DEFAULT_CENTER;
     const map = L.map(containerRef.current, {
-      center: [-29.9533, -71.3395],
-      zoom: 12,
+      center: main && savedView ? savedView.center : start,
+      zoom: main ? (savedView?.zoom ?? 12) : 13,
       zoomControl: false,
       attributionControl: true,
     });
@@ -264,7 +337,7 @@ function MapArtwork({
       iconSize: [24, 24],
       iconAnchor: [12, 12],
     });
-    userMarkerRef.current = L.marker([-29.9533, -71.3395], {
+    userMarkerRef.current = L.marker(start, {
       icon: userIcon,
       zIndexOffset: 500,
     })
@@ -275,7 +348,7 @@ function MapArtwork({
         className: "user-tooltip",
       })
       .addTo(map);
-    zoneCircleRef.current = L.circle([-29.9533, -71.3395], {
+    zoneCircleRef.current = L.circle(start, {
       radius: radius * 1000,
       color: "#f2f2f2",
       weight: 1.5,
@@ -288,6 +361,15 @@ function MapArtwork({
       .addTo(map);
     incidentLayerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
+    if (main) {
+      map.on("dragstart", () => {
+        userMovedMap = true;
+      });
+      map.on("moveend", () => {
+        const c = map.getCenter();
+        savedView = { center: [c.lat, c.lng], zoom: map.getZoom() };
+      });
+    }
 
     window.setTimeout(() => map.invalidateSize(), 0);
     return () => {
@@ -304,17 +386,20 @@ function MapArtwork({
       setLocationState("referencia");
       return;
     }
-    let firstFix = true;
     const watchId = navigator.geolocation.watchPosition(
       ({ coords }) => {
         const location: L.LatLngExpression = [coords.latitude, coords.longitude];
+        lastUserLocation = [coords.latitude, coords.longitude];
         setUserLocation(location);
         setLocationState("gps");
         userMarkerRef.current?.setLatLng(location);
         zoneCircleRef.current?.setLatLng(location);
-        if (firstFix) {
-          mapRef.current?.flyTo(location, 14, { duration: 1.2 });
-          firstFix = false;
+        if (main) {
+          // Auto-zoom solo en la primera carga de la app
+          if (!didInitialFly && !userMovedMap) mapRef.current?.flyTo(location, 14, { duration: 1.2 });
+          didInitialFly = true;
+        } else if (!mapRef.current?.getCenter().equals(location as L.LatLngTuple, 0.001)) {
+          mapRef.current?.setView(location, 13, { animate: false });
         }
       },
       () => setLocationState("referencia"),
@@ -410,20 +495,14 @@ function IncidentCard({ incident, onClick }: { incident: Incident; onClick: () =
 function BottomSheet({
   incidents,
   onIncident,
-  openMidSignal,
 }: {
   incidents: Incident[];
   onIncident: (i: Incident) => void;
-  openMidSignal: number;
 }) {
   const positions = [116, 390, Math.round(Math.min(window.innerHeight, 932) * 0.86)];
   const [height, setHeight] = useState(positions[0]);
   const [dragging, setDragging] = useState(false);
   const drag = useRef({ y: 0, height: 0 });
-
-  useEffect(() => {
-    if (openMidSignal > 0) setHeight(positions[1]);
-  }, [openMidSignal]);
 
   const snap = (value: number) => {
     const nearest = positions.reduce((a, b) => (Math.abs(b - value) < Math.abs(a - value) ? b : a));
@@ -780,28 +859,19 @@ function LocationPicker({ onSelect }: { onSelect: (location: SelectedLocation) =
         markerRef.current.setLatLng(latlng);
       }
       map.panTo(latlng);
-      const fallbackLabel = `${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}`;
-      onSelectRef.current({ lat: latlng.lat, lng: latlng.lng, label: fallbackLabel });
-      if (!mapTilerKey) return;
+      onSelectRef.current({ lat: latlng.lat, lng: latlng.lng, label: "Buscando dirección…" });
 
       const requestId = ++requestRef.current;
       setSearchingAddress(true);
+      let label = "Ubicación seleccionada en el mapa";
       try {
-        const response = await fetch(
-          `https://api.maptiler.com/geocoding/${latlng.lng},${latlng.lat}.json?key=${encodeURIComponent(mapTilerKey)}&language=es&limit=1`,
-        );
-        if (!response.ok) throw new Error("No se pudo obtener la dirección");
-        const data = (await response.json()) as {
-          features?: Array<{ place_name?: string; text?: string }>;
-        };
-        if (requestId !== requestRef.current) return;
-        const label = data.features?.[0]?.place_name || data.features?.[0]?.text || fallbackLabel;
-        onSelectRef.current({ lat: latlng.lat, lng: latlng.lng, label });
+        label = (await reverseGeocode(latlng.lat, latlng.lng)) ?? label;
       } catch {
-        // Las coordenadas siguen siendo válidas aunque no se pueda resolver una dirección.
-      } finally {
-        if (requestId === requestRef.current) setSearchingAddress(false);
+        // Sin conexión: se mantiene un texto genérico; las coordenadas siguen guardadas
       }
+      if (requestId !== requestRef.current) return;
+      onSelectRef.current({ lat: latlng.lat, lng: latlng.lng, label });
+      setSearchingAddress(false);
     });
     mapRef.current = map;
     window.setTimeout(() => map.invalidateSize(), 0);
@@ -957,7 +1027,7 @@ function ReportScreen({
           <p>Se notificará a</p>
           <strong>{notify}</strong>
         </div>
-        <button className="btn btn-red submit-btn" type="submit" disabled={!selectedLocation}>
+        <button className="btn btn-red submit-btn" type="submit" disabled={!selectedLocation || selectedLocation.label === "Buscando dirección…"}>
           <Icon name="alert" /> Enviar reporte
         </button>
       </form>
@@ -1181,7 +1251,6 @@ export default function App() {
   const [consentOpen, setConsentOpen] = useState(false);
   const [consent, setConsent] = useState<boolean>(() => load("sr_consent", true));
   const [radius, setRadius] = useState<number>(() => load("sr_radius", 1.5));
-  const [openMidSignal, setOpenMidSignal] = useState(0);
   const [toast, setToast] = useState("");
   const [alerts, setAlerts] = useState<AlertRecord[]>(() => load("sr_alerts", []));
   const [settings, setSettings] = useState(() =>
@@ -1314,7 +1383,6 @@ export default function App() {
           onBack={() => setScreen("map")}
           onSubmit={(incident) => {
             setIncidents((items) => [incident, ...items]);
-            setOpenMidSignal(Date.now());
             setScreen("map");
             setToast("Reporte enviado y agregado al mapa.");
           }}
@@ -1382,7 +1450,7 @@ export default function App() {
               </div>
             </header>
             <div className="map-wrap">
-              <MapArtwork incidents={incidents} radius={radius} onIncident={openIncident} />
+              <MapArtwork incidents={incidents} radius={radius} onIncident={openIncident} main />
               <button className="simulate-btn" onClick={() => setImpactOpen(true)}>
                 <Icon name="bolt" size={15} /> Simular impacto
               </button>
@@ -1443,7 +1511,6 @@ export default function App() {
             <BottomSheet
               incidents={incidents}
               onIncident={openIncident}
-              openMidSignal={openMidSignal}
             />
           </div>
         ) : (
