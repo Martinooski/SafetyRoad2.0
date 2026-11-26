@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: safetyroad-prototipo-demo
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python backend/servidor.py
+    envVars:
+      - key: SAFETYROAD_PUBLIC
+        value: "1"
+      - key: SAFETYROAD_AUTO_OPEN
+        value: "0"
+      - key: SAFETYROAD_DEMO_PASSWORD
+        sync: false

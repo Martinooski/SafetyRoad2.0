@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import { requestSafetyRoad, type ApiMetric, type ReportResponse, type TrackingResponse, type TrackingMovement } from "./safetyroad-api";
 
 const load = <T,>(key: string, fallback: T): T => {
   try {
@@ -91,7 +92,7 @@ async function reverseGeocode(lat: number, lng: number): Promise<string | null> 
 
 const SENSITIVITY_MS2: Record<string, number> = { Alta: 20, Media: 30, Baja: 40 };
 
-type Severity = "LEVE" | "MODERADA" | "GRAVE";
+type Severity = "LEVE" | "MODERADA" | "GRAVE" | "INDETERMINADA";
 type IncidentStatus =
   | "DETECTADO"
   | "EN_VERIFICACION"
@@ -118,6 +119,16 @@ type Incident = {
   lat: number;
   lng: number;
   pin: { left: string; top: string };
+  trackingToken?: string;
+  archivado?: boolean;
+  token?: string; // Compatibilidad con reportes guardados por la demo web anterior.
+  prioridadSugerida?: string;
+  serviciosDerivados?: string[];
+  movimientos?: TrackingMovement[];
+  tipoReportado?: string;
+  ninosReportados?: string;
+  rolReportante?: string;
+  createdAt?: string;
 };
 
 type AlertRecord = {
@@ -126,58 +137,28 @@ type AlertRecord = {
   status: IncidentStatus;
   date: string;
   reason: string;
+  trackingToken?: string;
+  incidentId?: string;
+  archivado?: boolean;
+  serviciosDerivados?: string[];
+  movimientos?: TrackingMovement[];
 };
 
-const INITIAL_INCIDENTS: Incident[] = [
-  {
-    id: "INC-2025-0087",
-    place: "Ruta 5 con Av. Videla",
-    severity: "MODERADA",
-    status: "ALERTA_OPERADOR",
-    time: "hace 1 hora",
-    date: "19 jun 2025 · 14:32",
-    camera: "CAM-CQBO-04",
-    origin: "CAMARA",
-    vehicles: 2,
-    heavy: true,
-    blockage: "Parcial (1 pista)",
-    lat: -29.9712,
-    lng: -71.3378,
-    pin: { left: "56%", top: "54%" },
-  },
-  {
-    id: "INC-2025-0086",
-    place: "Av. Costanera",
-    severity: "LEVE",
-    status: "CERRADO_ATENDIDO",
-    time: "hace 5 horas",
-    date: "19 jun 2025 · 10:08",
-    camera: "CAM-CQBO-11",
-    origin: "CAMARA",
-    vehicles: 1,
-    heavy: false,
-    blockage: "Sin bloqueo",
-    lat: -29.9465,
-    lng: -71.3462,
-    pin: { left: "27%", top: "35%" },
-  },
-  {
-    id: "INC-2025-0081",
-    place: "Aguirre con Larraín",
-    severity: "GRAVE",
-    status: "DERIVADO",
-    time: "ayer",
-    date: "18 jun 2025 · 18:47",
-    camera: "CAM-LS-07",
-    origin: "CAMARA",
-    vehicles: 4,
-    heavy: true,
-    blockage: "Total o mayoritario",
-    lat: -29.9078,
-    lng: -71.2521,
-    pin: { left: "72%", top: "26%" },
-  },
-];
+const INITIAL_INCIDENTS: Incident[] = [];
+
+
+// Solo mostrar en el mapa incidencias recientes y activas. Los expedientes
+// permanecen guardados en el historial, aunque su pin caduque.
+const MAP_VISIBLE_HOURS = 24;
+function isVisibleOnMap(item: Incident): boolean {
+  if (item.status.startsWith("CERRADO")) return false;
+  if (!Number.isFinite(item.lat) || !Number.isFinite(item.lng)) return false;
+  // Los ejemplos iniciales del diseño no representan hechos recientes.
+  if (item.id.startsWith("INC-2025-")) return false;
+  const ms = Date.parse(item.createdAt || item.date || "");
+  return Number.isFinite(ms) && Date.now() - ms >= 0 &&
+    Date.now() - ms < MAP_VISIBLE_HOURS * 60 * 60 * 1000;
+}
 
 const LIFECYCLE: IncidentStatus[] = [
   "DETECTADO",
@@ -416,13 +397,14 @@ function MapArtwork({
     const layer = incidentLayerRef.current;
     if (!layer) return;
     layer.clearLayers();
-    incidents.forEach((incident) => {
+    incidents.filter(isVisibleOnMap).forEach((incident) => {
+      if (!Number.isFinite(incident.lat) || !Number.isFinite(incident.lng)) return;
       const color =
         incident.severity === "GRAVE"
           ? "#e53935"
           : incident.severity === "MODERADA"
             ? "#f59e0b"
-            : "#facc15";
+            : incident.severity === "LEVE" ? "#22c55e" : "#94a3b8";
       const icon = L.divIcon({
         className: "live-incident-marker",
         html: `<span style="--pin-color:${color}"><b>!</b></span>`,
@@ -431,7 +413,7 @@ function MapArtwork({
       });
       L.marker([incident.lat, incident.lng], {
         icon,
-        title: `Incidente: ${incident.place}`,
+        title: `Prioridad ${incident.severity} (no confirmada): ${incident.place}`,
       })
         .on("click", () => onIncidentRef.current(incident))
         .addTo(layer);
@@ -543,12 +525,12 @@ function BottomSheet({
       >
         <button className="handle" onClick={cycle} aria-label="Cambiar altura de la hoja" />
         <div className="sheet-title">
-          <h2>Historial de incidentes cercanos</h2>
-          <span>{incidents.length} cercanos</span>
+          <h2>Incidentes de prueba y reportes de este dispositivo</h2>
+          <span>{incidents.filter(isVisibleOnMap).length} activos (24 h)</span>
         </div>
       </div>
       <div className="incident-list">
-        {incidents.map((incident) => (
+        {incidents.filter(isVisibleOnMap).map((incident) => (
           <IncidentCard
             key={incident.id}
             incident={incident}
@@ -593,7 +575,7 @@ function ImpactModal({ onResolve }: { onResolve: (needHelp: boolean) => void }) 
     >
       <div className="impact-card">
         <div className="impact-band">
-          <Icon name="warning" size={18} /> ALERTA DE IMPACTO DETECTADA
+          <Icon name="warning" size={18} /> MOVIMIENTO BRUSCO REGISTRADO
         </div>
         <div className="impact-body">
           <h2 id="impact-title">¿Estás bien?</h2>
@@ -614,7 +596,7 @@ function ImpactModal({ onResolve }: { onResolve: (needHelp: boolean) => void }) 
             </svg>
             <strong>{seconds}</strong>
           </div>
-          <p className="assist-copy">Se enviará asistencia automática</p>
+          <p className="assist-copy">Puedes solicitar atención sin completar formularios.</p>
           <button className="btn btn-green" onClick={() => resolve(false)}>
             <Icon name="check" /> SÍ, ESTOY BIEN <span>(Cancelar)</span>
           </button>
@@ -622,7 +604,7 @@ function ImpactModal({ onResolve }: { onResolve: (needHelp: boolean) => void }) 
             <Icon name="phone" /> NECESITO AYUDA
           </button>
           <p className="impact-foot">
-            Llamando a servicios de emergencia en <strong>{seconds}s</strong> si no hay respuesta…
+            Se registrará el aviso en <strong>{seconds}s</strong> si no cancelas.
           </p>
         </div>
       </div>
@@ -683,17 +665,12 @@ function DetailScreen({
   onUpdate: (status: IncidentStatus) => void;
 }) {
   const currentIndex = LIFECYCLE.indexOf(incident.status);
-  const notify =
-    incident.severity === "LEVE"
-      ? "Carabineros"
-      : incident.severity === "MODERADA"
-        ? "Carabineros y SAMU"
-        : "SAMU, Bomberos y Carabineros";
+
   const next =
     currentIndex >= 0 && currentIndex < LIFECYCLE.length - 1 ? LIFECYCLE[currentIndex + 1] : null;
   const json = {
     id_incidente: incident.id,
-    timestamp_deteccion: "2025-06-19T14:32:08-04:00",
+    timestamp_deteccion: incident.date,
     ubicacion: {
       latitud: incident.lat,
       longitud: incident.lng,
@@ -706,10 +683,7 @@ function DetailScreen({
       presencia_vehiculos_pesados: incident.heavy,
       bloqueo_calzada: incident.blockage,
     },
-    evidencia: {
-      url_fotograma_anonimizado: "/evidencia/fotograma-087.jpg",
-      url_clip_pre_post: "/evidencia/clip-087.mp4",
-    },
+    evidencia: { disponible: false, nota: "No hay evidencia de cámara en el reporte de la app" },
     estado_gestion: incident.status,
   };
   const rows = [
@@ -718,8 +692,8 @@ function DetailScreen({
     ["Vehículos", String(incident.vehicles)],
     ["Pesados", incident.heavy ? "Sí" : "No"],
     ["Bloqueo", incident.blockage],
-    ["Evidencia", "Fotograma anonimizado"],
-    ["Se notifica a", notify],
+    ["Evidencia", "No disponible en reporte ciudadano"],
+    ["Estado del despacho externo", "No conectado"],
   ];
   return (
     <div className="screen scroll-screen">
@@ -732,6 +706,7 @@ function DetailScreen({
             <Chip tone={incident.severity}>{incident.severity}</Chip>
             <Chip>{incident.origin}</Chip>
           </div>
+          {incident.trackingToken && <p>Reporte registrado. Sugerencia interna para revisión: {incident.prioridadSugerida || "sin clasificación"}. No confirma un accidente.</p>}
         </div>
         <section className="info-table">
           {rows.map(([key, value]) => (
@@ -767,18 +742,20 @@ function DetailScreen({
               );
             })}
           </div>
-          {next && (
+          {incident.trackingToken && <p>El estado se actualiza desde el panel del operador.</p>}
+          {next && !incident.trackingToken && (
             <button className="btn btn-red action-btn" onClick={() => onUpdate(next)}>
               Avanzar a {next}
-              <small>Demo operador</small>
+              <small>Ejemplo local, sin servidor</small>
             </button>
           )}
-          {incident.status === "EN_REVISION" && (
+          {incident.status === "EN_REVISION" && !incident.trackingToken && (
             <button className="btn btn-ghost" onClick={() => onUpdate("CERRADO_FALSA_ALARMA")}>
               Descartar (falsa alarma)
             </button>
           )}
         </section>
+        {incident.trackingToken && <DetalleDerivacion servicios={incident.serviciosDerivados} movimientos={incident.movimientos} />}
         <section className="detail-section json-section">
           <p className="eyebrow">DATOS TÉCNICOS</p>
           <h3>Registro (JSON)</h3>
@@ -915,43 +892,51 @@ function ReportScreen({
   onSubmit,
 }: {
   onBack: () => void;
-  onSubmit: (incident: Incident) => void;
+  onSubmit: (incident: Incident) => Promise<void>;
 }) {
   const [selectedLocation, setSelectedLocation] = useState<SelectedLocation | null>(null);
   const [vehicles, setVehicles] = useState(1);
   const [heavy, setHeavy] = useState(false);
   const [blockage, setBlockage] = useState("Sin bloqueo");
-  const severity: Severity =
-    blockage === "Total o mayoritario" || (vehicles >= 3 && heavy)
-      ? "GRAVE"
-      : vehicles >= 3 || heavy || blockage.startsWith("Parcial")
-        ? "MODERADA"
-        : "LEVE";
-  const notify =
-    severity === "LEVE"
-      ? "Carabineros"
-      : severity === "MODERADA"
-        ? "Carabineros y SAMU"
-        : "SAMU, Bomberos y Carabineros";
-  const submit = (e: React.FormEvent) => {
+  const [tipoReportado, setTipoReportado] = useState("Colisión");
+  const [ninosReportados, setNinosReportados] = useState("no_determinada");
+  const [rolReportante, setRolReportante] = useState("testigo");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedLocation) return;
-    onSubmit({
-      id: `INC-2025-${String(Date.now()).slice(-4)}`,
+    if (sending) return;
+    if (!selectedLocation || selectedLocation.label === "Buscando dirección…") {
+      setError("Falta seleccionar la ubicación del accidente: toca el mapa o usa tu GPS.");
+      return;
+    }
+    setSending(true);
+    setError("");
+    try {
+      await onSubmit({
+      id: `TEMP-${Date.now()}`,
       place: selectedLocation.label,
-      severity,
+      severity: "INDETERMINADA",
       status: "ALERTA_OPERADOR",
       time: "ahora",
-      date: "Ahora",
+      date: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
       camera: "APP-CIUDADANO",
       origin: "APP_CIUDADANO",
       vehicles,
       heavy,
       blockage,
+      tipoReportado, ninosReportados, rolReportante,
       lat: selectedLocation.lat,
       lng: selectedLocation.lng,
       pin: { left: "43%", top: "44%" },
-    });
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Error al comunicar con el servidor");
+    } finally {
+      setSending(false);
+    }
   };
   return (
     <div className="screen scroll-screen">
@@ -962,6 +947,15 @@ function ReportScreen({
       />
       <form className="screen-content form-content" onSubmit={submit}>
         <LocationPicker onSelect={setSelectedLocation} />
+        <button type="button" className="gps-loc-btn" onClick={() => {
+          if (!navigator.geolocation) { setError("GPS no disponible: toca el mapa para señalar el lugar."); return; }
+          setError("");
+          navigator.geolocation.getCurrentPosition(({ coords }) => {
+            setSelectedLocation({lat: coords.latitude, lng: coords.longitude,
+              label: "Mi ubicación GPS (seleccionada)"});
+          }, () => setError("No se pudo obtener la ubicación. Selecciona un punto en el mapa."),
+          {enableHighAccuracy: true, timeout: 10000});
+        }}>Usar mi ubicación GPS como lugar del accidente</button>
         <div className={`selected-place ${selectedLocation ? "ready" : ""}`}>
           <Icon name={selectedLocation ? "check" : "pin"} size={17} />
           <div>
@@ -969,6 +963,29 @@ function ReportScreen({
             <strong>{selectedLocation?.label || "Toca una calle o intersección en el mapa"}</strong>
           </div>
         </div>
+        <fieldset>
+          <legend>¿Qué ocurrió? (declaración del ciudadano)</legend>
+          <select value={tipoReportado} onChange={e => setTipoReportado(e.target.value)}>
+            <option>Colisión</option><option>Colisión múltiple</option><option>Vuelco</option>
+            <option>Contacto leve</option><option>Otro</option>
+          </select>
+        </fieldset>
+        <fieldset>
+          <legend>¿Participaron niños o niñas? (sin verificar)</legend>
+          <select value={ninosReportados} onChange={e => setNinosReportados(e.target.value)}>
+            <option value="no_determinada">No sé</option>
+            <option value="indicios_por_verificar">Sí, según lo que observé</option>
+            <option value="sin_indicios">No observé niños</option>
+          </select>
+        </fieldset>
+        <fieldset>
+          <legend>¿Cómo te enteraste del accidente?</legend>
+          <select value={rolReportante} onChange={e => setRolReportante(e.target.value)}>
+            <option value="testigo">Soy testigo / lo presencié</option>
+            <option value="involucrado">Estoy involucrado</option>
+            <option value="tercero">Me informaron otras personas</option>
+          </select>
+        </fieldset>
         <fieldset>
           <legend>Cantidad de vehículos</legend>
           <div className="segmented">
@@ -1018,58 +1035,287 @@ function ReportScreen({
           </div>
         </fieldset>
         <div className="severity-preview">
-          <p>GRAVEDAD ESTIMADA</p>
-          <div>
-            <Chip tone={severity}>{severity}</Chip>
-            <span>Según los datos ingresados</span>
-          </div>
-          <hr />
-          <p>Se notificará a</p>
-          <strong>{notify}</strong>
+          <p>REVISIÓN PRELIMINAR</p>
+          <strong>La prioridad se evaluará al recibir el reporte</strong>
+          <p>El reporte se registrará para que un operador lo revise.</p>
         </div>
-        <button className="btn btn-red submit-btn" type="submit" disabled={!selectedLocation || selectedLocation.label === "Buscando dirección…"}>
-          <Icon name="alert" /> Enviar reporte
+        {!selectedLocation && <p role="status" className="sr-form-help">Antes de enviar, marca la ubicación tocando el mapa superior o elige usar tu GPS. Las demás opciones no seleccionan el lugar automáticamente.</p>}
+        {error && <p role="alert" className="sr-form-error">{error}</p>}
+        <button className="btn btn-red submit-btn" type="submit" disabled={sending}>
+          <Icon name="alert" /> {sending ? "Enviando reporte…" : "Enviar reporte"}
         </button>
       </form>
     </div>
   );
 }
 
-function AlertsScreen({ records, onBack }: { records: AlertRecord[]; onBack: () => void }) {
+function DetalleDerivacion({ servicios = [], movimientos = [] }: {
+  servicios?: string[];
+  movimientos?: TrackingMovement[];
+}) {
+  const relevantes = movimientos.filter(m => ["tomar", "derivar", "cerrar", "falsa"].includes(m.accion));
+  if (!servicios.length && !relevantes.length) return null;
+  const nombres: Record<string, string> = {
+    tomar: "Operador tomó el caso",
+    derivar: "Derivación registrada",
+    cerrar: "Caso cerrado en el sistema",
+    falsa: "Descartado como falsa alarma",
+  };
+  const formatear = (fecha: string) => {
+    const d = new Date(fecha);
+    return Number.isNaN(d.getTime()) ? fecha : d.toLocaleString("es-CL", { dateStyle: "short", timeStyle: "short" });
+  };
   return (
-    <div className="screen scroll-screen">
-      <Header
-        title="Historial de alertas"
-        subtitle="Alertas detectadas por tu dispositivo"
-        onBack={onBack}
-      />
-      <main className="screen-content">
-        {records.length === 0 ? (
-          <div className="empty-state">
-            <Icon name="shield" size={36} />
-            <h2>Sin alertas registradas</h2>
-            <p>Tus alertas de impacto aparecerán aquí.</p>
-          </div>
+    <div className="safetyroad-derivacion" aria-label="Seguimiento desde el sistema">
+      {servicios.length > 0 && (
+        <p><strong>Servicios seleccionados:</strong> {servicios.join(", ")}</p>
+      )}
+      {relevantes.length > 0 && (
+        <div className="safetyroad-movimientos">
+          {relevantes.map((m, i) => (
+            <div key={`${m.accion}-${m.fecha}-${i}`}>
+              <strong>{nombres[m.accion] || m.accion}</strong>
+              <span> · {formatear(m.fecha)}</span>
+              {m.accion === "derivar" && m.servicios?.length ?
+                <span> · {m.servicios.join(", ")}</span> : null}
+            </div>
+          ))}
+        </div>
+      )}
+      <small>Derivación registrada en el expediente.</small>
+    </div>
+  );
+}
+
+// Historial de incidentes: tarjetas compactas y ficha independiente.
+// Se alimenta de los registros locales sincronizados con el backend servidor.
+type HistoryFilter = "Activos" | "Cerrados" | "Archivados";
+const HISTORY_FILTERS: HistoryFilter[] = ["Activos", "Cerrados", "Archivados"];
+
+function historyState(status: IncidentStatus): { label: string; tone: string; icon: string } {
+  if (status === "CERRADO_ATENDIDO") return { label: "Atendido", tone: "resolved", icon: "check" };
+  if (status === "CERRADO_FALSA_ALARMA") return { label: "Descartado", tone: "discarded", icon: "check" };
+  if (status === "DERIVADO") return { label: "Derivado", tone: "derived", icon: "phone" };
+  if (status === "EN_REVISION") return { label: "En revisión", tone: "review", icon: "shield" };
+  return { label: "Pendiente", tone: "pending", icon: "alert" };
+}
+
+function historyPriority(record: AlertRecord, incident?: Incident): { label: string; tone: string } {
+  if (record.status === "CERRADO_FALSA_ALARMA" && !incident) return { label: "Sin evaluación", tone: "none" };
+  // Usa primero la prioridad sincronizada con el operador, después la sugerencia inicial.
+  const suggested = (incident?.severity
+    ? ({ GRAVE: "P1", MODERADA: "P2", LEVE: "P3", INDETERMINADA: "IND" } as Record<string, string>)[incident.severity]
+    : undefined) || incident?.prioridadSugerida ||
+    record.reason.match(/prioridad sugerida\s*(P[123]|IND)/i)?.[1] || "IND";
+  if (suggested === "P1") return { label: "P1 · Grave", tone: "p1" };
+  if (suggested === "P2") return { label: "P2 · Moderada", tone: "p2" };
+  if (suggested === "P3") return { label: "P3 · Leve", tone: "p3" };
+  return { label: "IND · Sin determinar", tone: "ind" };
+}
+
+function historyOrigin(record: AlertRecord, incident?: Incident): { label: string; icon: string; kind: string } {
+  if (record.status === "CERRADO_FALSA_ALARMA" && !incident)
+    return { label: "Alerta de sensor descartada", icon: "check", kind: "discarded" };
+  if (incident?.origin === "APP_CIUDADANO" || /ciudadan|testigo/i.test(record.title + " " + record.reason))
+    return { label: "Reporte ciudadano", icon: "pin", kind: "citizen" };
+  return { label: "Alerta de sensor del celular", icon: "bolt", kind: "sensor" };
+}
+
+function historyTitle(record: AlertRecord, incident?: Incident): string {
+  if (record.status === "CERRADO_FALSA_ALARMA" && !incident) return "Alerta cancelada";
+  if (incident?.tipoReportado && incident.origin === "APP_CIUDADANO") return incident.tipoReportado;
+  if (/ciudadan|testigo/i.test(record.title + " " + record.reason)) {
+    return record.reason.split("·")[1]?.trim() || "Reporte ciudadano";
+  }
+  return "Movimiento sospechoso";
+}
+
+function historyMatches(record: AlertRecord, filter: HistoryFilter, archived: boolean): boolean {
+  if (filter === "Archivados") return archived;
+  if (archived) return false;
+  const closed = record.status === "CERRADO_ATENDIDO" || record.status === "CERRADO_FALSA_ALARMA";
+  return filter === "Cerrados" ? closed : !closed;
+}
+
+function historyReporter(value?: string): string {
+  return ({ testigo: "Testigo", involucrado: "Persona involucrada", tercero: "Información de terceros" } as Record<string, string>)[value || ""] || value || "No informada";
+}
+function historyKids(value?: string): string {
+  if (!value || value === "no_determinada" || value === "no_determinado") return "No determinado";
+  if (value === "indicios_por_verificar") return "Indicios según testigo (sin verificar)";
+  if (["si", "sí", "confirmada"].includes(value.toLowerCase())) return "Sí, según declaración (sin verificar)";
+  if (value === "no") return "No observados según testigo";
+  return value;
+}
+function historyTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("es-CL", { dateStyle: "short", timeStyle: "short" });
+}
+
+function AlertsScreen({ records, incidents, onBack, serverUrl }: {
+  records: AlertRecord[]; incidents: Incident[]; onBack: () => void; serverUrl: string;
+}) {
+  const [filter, setFilter] = useState<HistoryFilter>("Activos");
+  const [openedId, setOpenedId] = useState<number | null>(null);
+  const [archiveOverride, setArchiveOverride] = useState<Record<string, boolean>>({});
+  const [archiving, setArchiving] = useState(false);
+  const [archiveNotice, setArchiveNotice] = useState("");
+  const key = (r: AlertRecord) => r.trackingToken || r.incidentId || String(r.id);
+  const isArchived = (r: AlertRecord) => archiveOverride[key(r)] ?? Boolean(r.archivado);
+  const isClosed = (r: AlertRecord) => r.status.startsWith("CERRADO");
+  const archive = async (chosen: AlertRecord[], value: boolean) => {
+    const eligible = chosen.filter(r => isClosed(r) && r.trackingToken && isArchived(r) !== value);
+    if (!eligible.length) { setArchiveNotice("No hay casos cerrados con seguimiento para esta acción."); return; }
+    if (!window.confirm(value ? `¿Archivar ${eligible.length} caso(s) cerrado(s)? Seguirán guardados para las estadísticas y podrán recuperarse.` : `¿Restaurar ${eligible.length} caso(s) al historial de cerrados?`)) return;
+    setArchiving(true); setArchiveNotice("");
+    try {
+      const result = await requestSafetyRoad<{actualizados: string[]; total: number}>(
+        "/api/app/archivar", "POST", {tokens: eligible.map(r => r.trackingToken), archivado: value}, serverUrl);
+      const changedIds = new Set(result.actualizados || []);
+      const updated = eligible.filter(r => r.incidentId && changedIds.has(r.incidentId));
+      // El identificador de evento puede faltar en tarjetas antiguas: el servidor
+      // valida cada token; si contestó correctamente, actualizar las correspondientes.
+      const accepted = updated.length ? updated : eligible;
+      setArchiveOverride(prev => ({...prev, ...Object.fromEntries(accepted.map(r => [key(r), value]))}));
+      setOpenedId(null);
+      setArchiveNotice(value ? `${result.total} caso(s) archivado(s). Los indicadores no cambiaron.` : `${result.total} caso(s) recuperado(s).`);
+    } catch (err) {
+      setArchiveNotice(err instanceof Error ? err.message : "No se pudo conectar con el servicio.");
+    } finally { setArchiving(false); }
+  };
+  useEffect(() => {
+    // Once the server-synchronized record matches the optimistic local view,
+    // release the temporary override so future operator changes are reflected.
+    setArchiveOverride(prev => {
+      const next = {...prev}; let changed = false;
+      for (const record of records) {
+        const k = key(record);
+        if (Object.prototype.hasOwnProperty.call(next, k) && Boolean(record.archivado) === next[k]) {
+          delete next[k];changed=true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [records]);
+  const opened = records.find(record => record.id === openedId);
+  const findIncident = (record: AlertRecord): Incident | undefined =>
+    incidents.find(i => record.incidentId && i.id === record.incidentId) ||
+    incidents.find(i => record.trackingToken && (i.trackingToken === record.trackingToken || i.token === record.trackingToken));
+  const rendered = records.filter(record => historyMatches(record, filter, isArchived(record)));
+
+  if (opened) {
+    const incident = findIncident(opened);
+    const priority = historyPriority(opened, incident);
+    const state = historyState(opened.status);
+    const origin = historyOrigin(opened, incident);
+    const messages: { label: string; value: string }[] = [
+      { label: "Origen", value: origin.label },
+      { label: "ID del expediente", value: opened.incidentId || incident?.id || "Sin identificador asociado" },
+      { label: "Fecha y hora", value: opened.date },
+      { label: "Ubicación declarada", value: incident?.place || "No registrada" },
+      { label: "Relación con el accidente", value: historyReporter(incident?.rolReportante) },
+      { label: "Tipo reportado", value: incident?.tipoReportado || (origin.kind === "sensor" ? "Movimiento brusco" : "No informado") },
+      { label: "Vehículos", value: incident ? String(incident.vehicles) : "No informado" },
+      { label: "Vehículo pesado", value: incident ? (incident.heavy ? "Sí, declarado" : "No declarado") : "No informado" },
+      { label: "Bloqueo de vía", value: incident?.blockage || "No informado" },
+      { label: "Niños involucrados", value: historyKids(incident?.ninosReportados) },
+    ];
+    return (
+      <div className="screen scroll-screen sr-history-v2">
+        <Header title="Detalle del reporte" subtitle="Información y seguimiento del expediente" onBack={() => setOpenedId(null)} />
+        <main className="screen-content sr-history-detail">
+          <section className={`sr-history-hero sr-priority-${priority.tone}`}>
+            <div className="sr-history-hero-top">
+              <span className={`sr-history-type-icon sr-kind-${origin.kind}`}><Icon name={origin.icon} size={23}/></span>
+              <span className={`sr-history-pill sr-status-${state.tone}`}><Icon name={state.icon} size={13}/>{state.label}</span>
+            </div>
+            <p className="sr-history-eyebrow">{origin.label}</p>
+            <h2>{historyTitle(opened, incident)}</h2>
+            <span className={`sr-history-pill sr-priority-pill sr-priority-${priority.tone}`}>{priority.label}</span>
+            <p className="sr-history-caveat">Prioridad preliminar, no es una gravedad confirmada.</p>
+          </section>
+          <section className="sr-history-section">
+            <h3>Datos del reporte</h3>
+            <div className="sr-history-facts">
+              {messages.map(item => (
+                <div className="sr-history-fact" key={item.label}><span>{item.label}</span><strong>{item.value}</strong></div>
+              ))}
+            </div>
+          </section>
+          <section className="sr-history-section">
+            <h3>Descripción original</h3>
+            <p className="sr-history-description">{opened.reason}</p>
+          </section>
+          <section className="sr-history-section">
+            <h3>Seguimiento del operador</h3>
+            <div className="sr-history-timeline">
+              <div className="sr-history-timeline-item"><span className="sr-history-step-dot"/><div><strong>Reporte registrado</strong><small>{opened.date}</small></div></div>
+              {(opened.movimientos || []).map((m, index) => (
+                <div className="sr-history-timeline-item" key={`${m.fecha}-${index}`}>
+                  <span className="sr-history-step-dot"/>
+                  <div><strong>{m.accion === "tomar" ? "Caso en revisión" : m.accion === "derivar" ? "Derivación registrada" : m.accion === "cerrar" ? "Caso cerrado como atendido" : m.accion === "falsa" ? "Descartado" : m.accion}</strong>
+                  <small>{historyTime(m.fecha)}</small>
+                  {m.servicios && m.servicios.length > 0 && <small>{m.servicios.join(" · ")}</small>}</div>
+                </div>
+              ))}
+              {(!opened.movimientos || opened.movimientos.length === 0) && <p className="sr-history-no-actions">Sin actuaciones del operador registradas todavía.</p>}
+            </div>
+            {opened.serviciosDerivados && opened.serviciosDerivados.length > 0 && (
+              <div className="sr-history-services"><Icon name="phone" size={18}/><div><strong>Servicios seleccionados</strong><p>{opened.serviciosDerivados.join(" · ")}</p></div></div>
+            )}
+          </section>
+          {isClosed(opened) && opened.trackingToken && (
+            <button type="button" className="sr-history-archive-button" disabled={archiving} onClick={() => void archive([opened], !isArchived(opened))}>
+              <Icon name="check" size={15}/>{isArchived(opened) ? "Restaurar al historial" : "Archivar este caso cerrado"}
+            </button>
+          )}
+          {archiveNotice && <p className="sr-history-footnote" role="status">{archiveNotice}</p>}
+          <p className="sr-history-safety-note"><Icon name="shield" size={15}/> Entorno de pruebas: las derivaciones registradas no realizan despachos externos.</p>
+        </main>
+      </div>
+    );
+  }
+
+  return (
+    <div className="screen scroll-screen sr-history-v2">
+      <Header title="Historial de alertas" subtitle="Seguimiento de tus alertas y reportes" onBack={onBack} />
+      <main className="screen-content sr-history-content">
+        <div className="sr-history-heading"><div><h2>Seguimiento</h2><p>Casos resumidos. Toca para ver los detalles.</p></div><span>{rendered.length} visibles</span></div>
+        <div className="sr-history-tools">
+          <span>Los cerrados pueden archivarse sin borrar estadísticas.</span>
+          <button type="button" disabled={archiving} onClick={() => void archive(records.filter(r => isClosed(r) && !isArchived(r)), true)}>Limpiar cerradas</button>
+        </div>
+        {archiveNotice && <p className="sr-history-footnote" role="status">{archiveNotice}</p>}
+        <div className="sr-history-filters" aria-label="Filtrar por estado">
+          {HISTORY_FILTERS.map(item => <button type="button" key={item} onClick={() => setFilter(item)} className={filter === item ? "active" : ""} aria-pressed={filter === item}>{item}</button>)}
+        </div>
+        {rendered.length === 0 ? (
+          <div className="sr-history-empty"><Icon name="shield" size={30}/><h3>No hay reportes en esta categoría</h3><p>{records.length ? "Prueba otro filtro." : "Cuando envíes un reporte, aparecerá aquí."}</p></div>
         ) : (
-          <div className="alert-history">
-            {records.map((r) => (
-              <article className="history-card" key={r.id}>
-                <div className="history-icon">
-                  <Icon name={r.status === "CERRADO_FALSA_ALARMA" ? "check" : "phone"} />
-                </div>
-                <div>
-                  <h3>{r.title}</h3>
-                  <Chip tone={r.status === "CERRADO_FALSA_ALARMA" ? "green" : "gray"}>
-                    {r.status}
-                  </Chip>
-                  <p>
-                    {r.date} · {r.reason}
-                  </p>
-                </div>
-              </article>
-            ))}
+          <div className="sr-history-list">
+            {rendered.map(r => {
+              const incident = findIncident(r);
+              const priority = historyPriority(r, incident);
+              const state = historyState(r.status);
+              const origin = historyOrigin(r, incident);
+              return (
+                <button type="button" key={r.id} className={`sr-history-card sr-priority-${priority.tone}`} onClick={() => setOpenedId(r.id)} aria-label={`Ver detalle de ${historyTitle(r, incident)}; ${state.label}`}>
+                  <div className="sr-history-card-top">
+                    <span className={`sr-history-type-icon sr-kind-${origin.kind}`}><Icon name={origin.icon} size={23}/></span>
+                    <div className="sr-history-card-title"><strong>{historyTitle(r, incident)}</strong><small>{origin.label}</small></div>
+                    <Icon name="chevron" size={17}/>
+                  </div>
+                  <div className="sr-history-labels">
+                    <span className={`sr-history-pill sr-priority-pill sr-priority-${priority.tone}`}>{priority.label}</span>
+                    <span className={`sr-history-pill sr-status-${state.tone}`}><Icon name={state.icon} size={13}/>{state.label}</span>
+                  </div>
+                  <div className="sr-history-card-foot"><span><Icon name="pin" size={13}/>{incident?.place || (origin.kind === "citizen" ? "Ubicación pendiente" : "Ubicación no registrada")}</span><time>{r.date}</time></div>
+                </button>
+              );
+            })}
           </div>
         )}
+        <p className="sr-history-footnote">Archivar oculta casos cerrados en ambas vistas, pero no elimina expedientes ni estadísticas. Solo se sincronizan reportes con código de seguimiento conservado.</p>
       </main>
     </div>
   );
@@ -1128,39 +1374,46 @@ function ZoneScreen({
   );
 }
 
-function MetricsScreen({ onBack, incidents }: { onBack: () => void; incidents: Incident[] }) {
-  const metrics = [
-    ["Tasa de falsas alarmas", "8,2%", "≤ 15%", true],
-    ["Completitud de la ficha", "100%", "100%", true],
-    ["Tiempo total de detección", "3,8 s", "≤ 5 s", true],
-    ["Tiempo de notificación", "3,4 s", "≤ 3 s", false],
-  ] as const;
+function MetricsScreen({ onBack, incidents, metrics, error, operational }: {
+  onBack: () => void;
+  incidents: Incident[];
+  metrics: ApiMetric[];
+  error: string;
+  operational: Record<string, number | string | null>;
+}) {
   return (
     <div className="screen scroll-screen">
-      <Header title="Indicadores" subtitle="Rendimiento de SafetyRoad" onBack={onBack} />
+      <Header title="Indicadores" subtitle="Resultados del sistema" onBack={onBack} />
       <main className="screen-content">
         <div className="metric-summary">
-          <p>INCIDENTES MONITOREADOS</p>
-          <strong>{incidents.length}</strong>
-          <span>en tu zona durante los últimos 7 días</span>
+          <p>INDICADORES CENTRALIZADOS</p>
+          <strong>{metrics.length || "—"}</strong>
+          <span>calculados o declarados pendientes por el backend</span>
+        </div>
+        {error && <p role="alert" style={{ color: "#b91c1c" }}>{error}</p>}
+        <div className="metric-summary" style={{ marginBottom: 12 }}>
+          <p>TIEMPOS OPERATIVOS</p>
+          <span>Procesamiento: {operational.procesamiento_python_ms ?? "—"} ms · Primera vista: {operational.registro_a_primera_vista_s ?? "—"} s · Derivación: {operational.registro_a_derivacion_s ?? "—"} s.</span>
+          <span>Reportes ciudadanos descartados: {operational.reportes_ciudadanos_descartados ?? 0}/{operational.reportes_ciudadanos_total ?? 0} ({operational.reportes_ciudadanos_descartados_pct ?? "—"} %)</span>
+          <span>No son tiempo de red ni de llegada de servicios.</span>
         </div>
         <div className="metrics-grid">
-          {metrics.map(([name, value, goal, ok]) => (
-            <article className="metric-card" key={name}>
+          {metrics.map((metric, index) => (
+            <article className="metric-card" key={metric.name || index}>
               <div>
-                <span>{name}</span>
-                <Chip tone={ok ? "green" : "red"}>{ok ? "CUMPLE" : "NO CUMPLE"}</Chip>
+                <span>{metric.name || metric.nombre || `Indicador ${index + 1}`}</span>
+                <Chip tone={metric.measured ? "green" : "gray"}>
+                  {metric.measured ? "CALCULADO" : "SIN MEDIR"}
+                </Chip>
               </div>
-              <strong>{value}</strong>
-              <p>Meta {goal}</p>
-              <i className={ok ? "ok" : "bad"} />
+              <strong>{metric.value}</strong>
+              <p>{metric.note}</p>
+              <p>Meta: {metric.target || metric.meta || "Por definir"}</p>
             </article>
           ))}
         </div>
-        <p className="metrics-note">
-          Los indicadores se calculan sobre los incidentes procesados durante los últimos 30 días.
-          Última actualización: hoy, 14:40.
-        </p>
+        {!metrics.length && <p className="metrics-note">Sin conexión con el servicio: no hay indicadores disponibles.</p>}
+        <p className="metrics-note">Los indicadores pendientes requieren datos validados.</p>
       </main>
     </div>
   );
@@ -1171,17 +1424,37 @@ function SettingsScreen({
   onBack,
   onSave,
   onRevoke,
+  onTest,
 }: {
-  settings: { contact: string; emergency: string; sensitivity: string };
+  settings: { contact: string; emergency: string; sensitivity: string; serverUrl: string };
   onBack: () => void;
-  onSave: (s: { contact: string; emergency: string; sensitivity: string }) => void;
+  onSave: (s: { contact: string; emergency: string; sensitivity: string; serverUrl: string }) => void;
   onRevoke: () => void;
+  onTest: (url: string) => Promise<string>;
 }) {
   const [form, setForm] = useState(settings);
+  const [testStatus, setTestStatus] = useState("");
   return (
     <div className="screen scroll-screen">
       <Header title="Configuración" subtitle="Cobertura y detección de impactos" onBack={onBack} />
       <main className="screen-content form-content settings-form">
+        <section>
+          <p className="eyebrow">CONEXIÓN AL SERVICIO</p>
+          <h2>Servidor SafetyRoad</h2>
+          <label className="field">
+            <span>Dirección IP del computador en la red Wi-Fi (ejemplo: http://192.168.1.10:8765)</span>
+            <input type="url" value={form.serverUrl || ""}
+              onChange={(e) => setForm({ ...form, serverUrl: e.target.value })}
+              placeholder="http://192.168.1.10:8765" />
+          </label>
+          <button type="button" className="btn btn-ghost" onClick={async () => {
+            setTestStatus("Comprobando…");
+            try { setTestStatus(await onTest(form.serverUrl)); }
+            catch (e) { setTestStatus(e instanceof Error ? e.message : "No se pudo conectar"); }
+          }}>Comprobar conexión</button>
+          {testStatus && <p role="status">{testStatus}</p>}
+          <p>Solo usar en una red local de pruebas. El detector es experimental, funciona únicamente mientras la app está activa y NO contacta a emergencias.</p>
+        </section>
         <section>
           <p className="eyebrow">CONTACTOS</p>
           <h2>Asistencia de emergencia</h2>
@@ -1245,17 +1518,26 @@ function SettingsScreen({
 export default function App() {
   const [screen, setScreen] = useState<Screen>("map");
   const [menuOpen, setMenuOpen] = useState(false);
-  const [incidents, setIncidents] = useState<Incident[]>(() => load("sr_incidents", INITIAL_INCIDENTS));
-  const [selectedId, setSelectedId] = useState(INITIAL_INCIDENTS[0].id);
+  const [incidents, setIncidents] = useState<Incident[]>(() =>
+    load<Incident[]>("sr_incidents", INITIAL_INCIDENTS).filter((incident) => !incident.id.startsWith("INC-2025-")).map((incident) => ({
+      ...incident,
+      trackingToken: incident.trackingToken || incident.token,
+    }))
+  );
+  const [selectedId, setSelectedId] = useState("");
   const [impactOpen, setImpactOpen] = useState(false);
-  const [consentOpen, setConsentOpen] = useState(false);
-  const [consent, setConsent] = useState<boolean>(() => load("sr_consent", true));
+  const [consentOpen, setConsentOpen] = useState(() => load("sr_consent", null as boolean | null) === null);
+  const [consent, setConsent] = useState<boolean>(() => load("sr_consent", false));
   const [radius, setRadius] = useState<number>(() => load("sr_radius", 1.5));
   const [toast, setToast] = useState("");
   const [alerts, setAlerts] = useState<AlertRecord[]>(() => load("sr_alerts", []));
-  const [settings, setSettings] = useState(() =>
-    load("sr_settings", { contact: "", emergency: "131 – SAMU", sensitivity: "Media" }),
-  );
+  const [apiMetrics, setApiMetrics] = useState<ApiMetric[]>([]);
+  const [apiMetricsError, setApiMetricsError] = useState("");
+  const [operational, setOperational] = useState<Record<string, number | string | null>>({});
+  const [settings, setSettings] = useState(() => ({
+    contact: "", emergency: "131 – SAMU", sensitivity: "Media", serverUrl: "",
+    ...load("sr_settings", {} as Record<string, string>),
+  }));
   const selected = incidents.find((i) => i.id === selectedId) || incidents[0];
 
   useEffect(() => {
@@ -1275,6 +1557,135 @@ export default function App() {
   useEffect(() => save("sr_consent", consent), [consent]);
 
   useEffect(() => {
+    if (screen !== "metrics") return;
+    setApiMetricsError("");
+    requestSafetyRoad<{ metrics: ApiMetric[]; tiempos_operativos: Record<string, number | string | null> }>("/api/app/indicadores", "GET", undefined, settings.serverUrl)
+      .then((r) => {setApiMetrics(r.metrics);setOperational(r.tiempos_operativos || {});})
+      .catch((err) => { setApiMetrics([]); setApiMetricsError(err instanceof Error ? err.message : "Sin conexión"); });
+  }, [screen, settings.serverUrl]);
+
+  // Sincronización con el servidor. Las cancelaciones locales cuentan como descartes
+  // experimentales, SIN generar una notificación a emergencias.
+  // Los casos antiguos sin token sólo se reconcilian si la fecha/minuto permite
+  // encontrar UNA coincidencia única entre los casos de la app.
+  useEffect(() => {
+    let active = true;
+    let busy = false;
+    const norm = (v: unknown) => String(v || "").toLowerCase().replace(/[.,\s]/g, "");
+    const timeText = (v: string) => {
+      try { return new Date(v).toLocaleString("es-CL", { dateStyle: "short", timeStyle: "short" }); }
+      catch { return ""; }
+    };
+    type ServerCase = {
+      id: string; source: string; origen?: string; created_at: string;
+      st: string; p: string; servicios?: string[]; archivado?: boolean;
+      historial?: Array<{ fecha: string; accion: string; a?: string; detalle?: string | string[] }>;
+    };
+    const legacyMatch = (date: string, events: ServerCase[]) => {
+      const candidates = events.filter(e => e.source === "APP" && e.origen === "app_sensor"
+        && norm(timeText(e.created_at)) === norm(date));
+      return candidates.length === 1 ? candidates[0] : undefined;
+    };
+    const sync = async () => {
+      if (busy || !active) return;
+      busy = true;
+      try {
+        const records = load<AlertRecord[]>("sr_alerts", []);
+        for (const record of records) {
+          if (!active) return;
+          if (record.status !== "CERRADO_FALSA_ALARMA" || record.trackingToken ||
+              !record.title.toLowerCase().includes("cancelad")) continue;
+          const clientId = `cancel_${String(record.id).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 70)}`;
+          try {
+            const answer = await requestSafetyRoad<{ token: string; id: string; estado: IncidentStatus }>(
+              "/api/app/cancelar", "POST", { client_event_id: clientId }, settings.serverUrl);
+            if (!active) return;
+            setAlerts(prev => prev.map(r => r.id === record.id ? {
+              ...r, trackingToken: answer.token, incidentId: answer.id,
+              status: answer.estado, reason: "Cancelada desde la aplicación",
+            } : r));
+          } catch { /* Reintentar cuando el servidor vuelva a estar disponible. */ }
+        }
+        const tracked = load<Incident[]>("sr_incidents", []).filter(i => i.trackingToken || i.token);
+        const followups = await Promise.all(tracked.map(async item => {
+          const token = item.trackingToken || item.token || "";
+          try {
+            const response = await requestSafetyRoad<TrackingResponse>(
+              `/api/app/seguimiento?token=${encodeURIComponent(token)}`,
+              "GET", undefined, settings.serverUrl);
+            return { token, response };
+          } catch { return null; }
+        }));
+        if (!active) return;
+        const byToken = new Map(followups.filter((r): r is NonNullable<typeof r> => r !== null)
+          .map(r => [r.token, r.response]));
+        let remote: ServerCase[] = [];
+        try {
+          const state = await requestSafetyRoad<{ events: ServerCase[] }>(
+            "/api/estado", "GET", undefined, settings.serverUrl);
+          remote = state.events || [];
+        } catch { /* Puede estar sin conexión. */ }
+        if (!active) return;
+        setIncidents(prev => prev.map(item => {
+          const token = item.trackingToken || item.token || "";
+          const answer = byToken.get(token);
+          const legacy = !answer ? remote.find(e => e.id === item.id)
+            || ((item.camera === "APP-IMPACTO" || item.origin === "APP_IMPACTO")
+              ? legacyMatch(item.date, remote) : undefined) : undefined;
+          if (!answer && !legacy) return item;
+          const nextId = answer?.id || legacy!.id;
+          const nextStatus = ((answer?.estado || legacy!.st) === "DERIVADO_SIMULADO"
+            ? "DERIVADO" : (answer?.estado || legacy!.st)) as IncidentStatus;
+          const p = answer?.prioridad || legacy!.p;
+          const serviciosDerivados = answer?.servicios || legacy?.servicios || [];
+          const movimientos: TrackingMovement[] = answer?.movimientos ||
+            (legacy?.historial || []).map(m => ({
+              fecha: m.fecha, accion: m.accion, estado: m.a,
+              servicios: m.accion === "derivar" && Array.isArray(m.detalle) ? m.detalle : []
+            }));
+          const archivado = Boolean(answer?.archivado ?? legacy?.archivado ?? item.archivado);
+          if (item.status === nextStatus && item.id === nextId && Boolean(item.archivado) === archivado &&
+              JSON.stringify(item.serviciosDerivados || []) === JSON.stringify(serviciosDerivados) &&
+              JSON.stringify(item.movimientos || []) === JSON.stringify(movimientos)) return item;
+          return { ...item, id: nextId, status: nextStatus, archivado,
+            serviciosDerivados, movimientos,
+            severity: p === "P1" ? "GRAVE" : p === "P2" ? "MODERADA" : p === "P3" ? "LEVE" : "INDETERMINADA" };
+        }));
+        setAlerts(prev => prev.map(record => {
+          let token = record.trackingToken;
+          if (!token && record.status !== "CERRADO_FALSA_ALARMA") {
+            const matches = tracked.filter(t => t.date === record.date &&
+              (t.camera === "APP-IMPACTO" || t.origin === "APP_IMPACTO"));
+            if (matches.length === 1) token = matches[0].trackingToken || matches[0].token;
+          }
+          const answer = token ? byToken.get(token) : undefined;
+          const legacy = !answer ? remote.find(e => e.id === record.incidentId)
+            || (record.status !== "CERRADO_FALSA_ALARMA" ? legacyMatch(record.date, remote) : undefined) : undefined;
+          if (!answer && !legacy) return record;
+          const nextId = answer?.id || legacy!.id;
+          const nextStatus = ((answer?.estado || legacy!.st) === "DERIVADO_SIMULADO"
+            ? "DERIVADO" : (answer?.estado || legacy!.st)) as IncidentStatus;
+          const serviciosDerivados = answer?.servicios || legacy?.servicios || [];
+          const movimientos: TrackingMovement[] = answer?.movimientos ||
+            (legacy?.historial || []).map(m => ({
+              fecha: m.fecha, accion: m.accion, estado: m.a,
+              servicios: m.accion === "derivar" && Array.isArray(m.detalle) ? m.detalle : []
+            }));
+          const archivado = Boolean(answer?.archivado ?? legacy?.archivado ?? record.archivado);
+          if (record.status === nextStatus && record.incidentId === nextId && record.trackingToken === token && Boolean(record.archivado) === archivado &&
+              JSON.stringify(record.serviciosDerivados || []) === JSON.stringify(serviciosDerivados) &&
+              JSON.stringify(record.movimientos || []) === JSON.stringify(movimientos)) return record;
+          return { ...record, status: nextStatus, trackingToken: token,
+            incidentId: nextId, archivado, serviciosDerivados, movimientos };
+        }));
+      } finally { busy = false; }
+    };
+    void sync();
+    const timer = window.setInterval(() => { void sync(); }, 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [settings.serverUrl]);
+
+  useEffect(() => {
     if (!consent || !navigator.geolocation) return;
     const id = navigator.geolocation.watchPosition(
       ({ coords }) => {
@@ -1289,15 +1700,26 @@ export default function App() {
   useEffect(() => {
     if (!consent) return;
     const limit = SENSITIVITY_MS2[settings.sensitivity] ?? 30;
-    let last = 0;
+    let lastAlert = 0;
+    let lastHit = 0;
+    let consecutiveHits = 0;
     const onMotion = (e: DeviceMotionEvent) => {
-      const a = e.accelerationIncludingGravity;
+      // Sólo la aceleración lineal: accelerationIncludingGravity incluye ~9.81 m/s².
+      // Dos muestras cercanas reducen falsas alarmas, pero NO verifican un choque.
+      const a = e.acceleration;
       if (!a || impactOpenRef.current) return;
       const g = Math.hypot(a.x ?? 0, a.y ?? 0, a.z ?? 0);
       const now = Date.now();
-      if (g > limit && now - last > 10000) {
-        last = now;
-        setImpactOpen(true);
+      if (g >= limit) {
+        consecutiveHits = now - lastHit <= 600 ? consecutiveHits + 1 : 1;
+        lastHit = now;
+        if (consecutiveHits >= 2 && now - lastAlert > 15000) {
+          lastAlert = now;
+          consecutiveHits = 0;
+          setImpactOpen(true);
+        }
+      } else if (now - lastHit > 600) {
+        consecutiveHits = 0;
       }
     };
     window.addEventListener("devicemotion", onMotion);
@@ -1309,54 +1731,63 @@ export default function App() {
     setScreen("detail");
     setMenuOpen(false);
   };
-  const resolveImpact = (needHelp: boolean) => {
+  const resolveImpact = async (needHelp: boolean) => {
     setImpactOpen(false);
     const now = new Date().toLocaleString("es-CL", { dateStyle: "short", timeStyle: "short" });
     if (needHelp) {
-      setAlerts((a) => [
-        {
-          id: Date.now(),
-          title: "Asistencia solicitada",
-          status: "ALERTA_OPERADOR",
-          date: now,
-          reason: "Impacto detectado",
-        },
-        ...a,
-      ]);
       const impact: Incident = {
         id: `IMP-${Date.now()}`,
-        place: "Ubicación actual",
-        severity: "GRAVE",
+        place: lastPos.current ? "Ubicación GPS del dispositivo" : "Sin ubicación GPS",
+        severity: "INDETERMINADA",
         status: "ALERTA_OPERADOR",
         time: "ahora",
         date: now,
+        createdAt: new Date().toISOString(),
         camera: "APP-IMPACTO",
         origin: "APP_IMPACTO",
         vehicles: 1,
         heavy: false,
         blockage: "Por verificar",
-        lat: lastPos.current?.lat ?? -29.953,
-        lng: lastPos.current?.lng ?? -71.338,
+        lat: lastPos.current?.lat ?? NaN,
+        lng: lastPos.current?.lng ?? NaN,
         pin: { left: "48%", top: "50%" },
       };
-      setIncidents((items) => [impact, ...items]);
-      const number = settings.emergency.slice(0, 3);
-      setToast(`Asistencia solicitada. Abriendo llamada al ${number}.`);
-      window.setTimeout(() => {
-        window.location.href = `tel:${number}`;
-      }, 300);
+      try {
+        const respuesta = await requestSafetyRoad<ReportResponse>("/api/app/reportar", "POST", {
+          origen: "app_sensor",
+          tipo: "Movimiento sospechoso",
+          ubicacion: lastPos.current
+            ? `GPS ${lastPos.current.lat.toFixed(5)}, ${lastPos.current.lng.toFixed(5)}`
+            : "Ubicación no disponible (GPS sin datos)",
+          lat: lastPos.current?.lat,
+          lng: lastPos.current?.lng,
+          vehiculos: 0,
+          bloqueo: "No determinado",
+          descripcion: "La persona solicitó ayuda tras una alerta experimental de movimiento. Gravedad por verificar.",
+          requiere_asistencia: true,
+        }, settings.serverUrl);
+        setIncidents((items) => [{ ...impact, id: respuesta.id,
+          trackingToken: respuesta.token, prioridadSugerida: respuesta.sugerencia }, ...items]);
+        setAlerts((a) => [{ id: Date.now(), title: "Alerta de sensor registrada",
+          status: respuesta.estado || "ALERTA_OPERADOR", date: now,
+          trackingToken: respuesta.token, incidentId: respuesta.id,
+          reason: "Movimiento brusco; no confirma choque" }, ...a]);
+        setToast(`Alerta de sensor ${respuesta.id} registrada; pendiente de revisión.`);
+      } catch (err) {
+        setToast(`No se registró el aviso: ${err instanceof Error ? err.message : "sin conexión con el servidor"}`);
+      }
     } else {
       setAlerts((a) => [
         {
           id: Date.now(),
-          title: "Cancelada – estoy bien",
+          title: "Alerta local cancelada",
           status: "CERRADO_FALSA_ALARMA",
           date: now,
-          reason: "Cancelada por el usuario",
+          reason: "Cancelada por el usuario; actualizando indicador",
         },
         ...a,
       ]);
-      setToast("Alerta cancelada y registrada como falsa alarma.");
+      setToast("Alerta cancelada. Se registrará el descarte en el sistema sin avisar a emergencias.");
     }
   };
   const updateIncident = (status: IncidentStatus) => {
@@ -1381,15 +1812,35 @@ export default function App() {
       return (
         <ReportScreen
           onBack={() => setScreen("map")}
-          onSubmit={(incident) => {
-            setIncidents((items) => [incident, ...items]);
+          onSubmit={async (incident) => {
+            const bloqueo = incident.blockage === "Sin bloqueo" ? "No"
+              : incident.blockage.startsWith("Parcial") ? "Parcial" : "Total";
+            const descripcion = `${incident.vehicles} vehículo(s); pesado: ${incident.heavy ? "sí" : "no"}; bloqueo: ${incident.blockage}. Reporte ciudadano sin verificación.`;
+            const respuesta = await requestSafetyRoad<ReportResponse>("/api/app/reportar", "POST", {
+              origen: "app_manual", tipo: incident.tipoReportado || "Otro", ubicacion: incident.place,
+              lat: incident.lat, lng: incident.lng, vehiculos: incident.vehicles,
+              vehiculo_pesado: incident.heavy, bloqueo,
+              ninos: incident.ninosReportados || "no_determinada",
+              rol_reportante: incident.rolReportante || "testigo", descripcion,
+            }, settings.serverUrl);
+            if (!respuesta.ok || !respuesta.id || !respuesta.token)
+              throw new Error("servidor no confirmó el registro. No se añadió el reporte.");
+            const sugerencia = respuesta.prioridad || respuesta.sugerencia || "IND";
+            const gravedad = sugerencia === "P1" ? "GRAVE" : sugerencia === "P2" ? "MODERADA" : sugerencia === "P3" ? "LEVE" : "INDETERMINADA";
+            setIncidents((items) => [{ ...incident, id: respuesta.id, createdAt: new Date().toISOString(),
+              status: respuesta.estado || "ALERTA_OPERADOR", severity: gravedad,
+              trackingToken: respuesta.token, prioridadSugerida: sugerencia }, ...items]);
+            setAlerts(items => [{ id: Date.now(), title: "Reporte ciudadano enviado",
+              status: respuesta.estado || "ALERTA_OPERADOR", date: new Date().toLocaleString("es-CL"),
+              reason: `${incident.rolReportante === "testigo" ? "Testigo" : "Ciudadano"} · ${incident.tipoReportado || "Posible accidente"} · Prioridad sugerida ${sugerencia} (sin confirmar)`,
+              trackingToken: respuesta.token, incidentId: respuesta.id }, ...items]);
             setScreen("map");
-            setToast("Reporte enviado y agregado al mapa.");
+            setToast(`Reporte ${respuesta.id} recibido. Prioridad sugerida: ${sugerencia} (sin verificar).`);
           }}
         />
       );
     if (screen === "alerts")
-      return <AlertsScreen records={alerts} onBack={() => setScreen("map")} />;
+      return <AlertsScreen records={alerts} incidents={incidents} serverUrl={settings.serverUrl} onBack={() => setScreen("map")} />;
     if (screen === "zone")
       return (
         <ZoneScreen
@@ -1403,7 +1854,8 @@ export default function App() {
         />
       );
     if (screen === "metrics")
-      return <MetricsScreen incidents={incidents} onBack={() => setScreen("map")} />;
+      return <MetricsScreen incidents={incidents} metrics={apiMetrics}
+        error={apiMetricsError} operational={operational} onBack={() => setScreen("map")} />;
     if (screen === "settings")
       return (
         <SettingsScreen
@@ -1414,6 +1866,11 @@ export default function App() {
             setScreen("map");
             setToast("Configuración guardada.");
           }}
+          onTest={async (url) => {
+            const result = await requestSafetyRoad<{ ok: boolean; modo: string }>("/api/salud", "GET", undefined, url);
+            if (!result.ok) throw new Error("servidor no respondió correctamente");
+            return `Conectado al sistema (${result.modo}). Sin llamadas de emergencia.`;
+          }}
           onRevoke={() => {
             setConsentOpen(true);
             setConsent(false);
@@ -1422,7 +1879,7 @@ export default function App() {
         />
       );
     return null;
-  }, [screen, selected, alerts, radius, incidents, settings]);
+  }, [screen, selected, alerts, radius, incidents, settings, apiMetrics, apiMetricsError]);
 
   return (
     <div className="app-shell">
@@ -1442,7 +1899,7 @@ export default function App() {
                   SafetyRoad <span>2.0</span>
                 </h1>
                 <p>
-                  <i /> {consent ? "Activa en segundo plano" : "Protección desactivada"}
+                  <i /> {consent ? "Sensores (solo con app abierta)" : "Protección desactivada"}
                 </p>
               </div>
               <div className="shield-status">
@@ -1452,7 +1909,7 @@ export default function App() {
             <div className="map-wrap">
               <MapArtwork incidents={incidents} radius={radius} onIncident={openIncident} main />
               <button className="simulate-btn" onClick={() => setImpactOpen(true)}>
-                <Icon name="bolt" size={15} /> Simular impacto
+                <Icon name="bolt" size={15} /> Probar alerta
               </button>
               {menuOpen && <div className="map-dim" onClick={() => setMenuOpen(false)} />}
               {menuOpen && (

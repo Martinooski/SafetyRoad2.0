@@ -6,11 +6,11 @@ android {
     namespace = "cl.safetyroad.app"
     compileSdk = 34
     defaultConfig {
-        applicationId = "cl.safetyroad.app"
+        applicationId = "cl.safetyroad.app.demo"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "2.0-sin-yolo"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

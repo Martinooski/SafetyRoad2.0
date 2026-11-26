@@ -2,32 +2,42 @@ name: Build APK
 on:
   push:
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: '22.16.0'
       - uses: pnpm/action-setup@v4
         with:
           version: 10
-      - name: Compilar la app web (React)
+      - name: Compilar React para Android
         working-directory: web
         run: |
-          pnpm install --no-frozen-lockfile
+          pnpm install --frozen-lockfile
           pnpm run build:android
+          test -s ../app/src/main/assets/www/index.html
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: Instalar SDK Android 34
+        run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
       - name: Compilar APK
-        run: gradle assembleDebug
+        run: |
+          gradle --no-daemon assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk SafetyRoad-2.0.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: SafetyRoad-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: SafetyRoad-2.0-APK
+          path: SafetyRoad-2.0.apk
+          if-no-files-found: error

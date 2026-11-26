@@ -1,0 +1,56 @@
+[
+  {
+    "nombre": "Tiempo de Notificación en Dashboard",
+    "definicion": "Tiempo transcurrido entre la confirmación algorítmica de la colisión y el despliegue visual de la alerta en la pantalla del operador.",
+    "formula": null,
+    "unidad": "Segundos (s)",
+    "datos_necesarios": "Timestamps del servidor WebSocket y de la interfaz web.",
+    "metodo_evaluacion": "Comparación de logs entre backend y frontend.",
+    "meta": "<= 3s"
+  },
+  {
+    "nombre": "Completitud de Información del Incidente",
+    "definicion": "Proporción de eventos registrados que despliegan la totalidad de antecedentes requeridos en la ficha del dashboard (ubicación, fecha/hora, evidencia, vehículos y gravedad)",
+    "formula": null,
+    "unidad": "Porcentaje (%)",
+    "datos_necesarios": "Registros en la base de datos e inspección de tarjetas de alertas.",
+    "metodo_evaluacion": "Auditoría directa del esquema de datos en la interfaz.",
+    "meta": "100%"
+  },
+  {
+    "nombre": "Precisión de Detección de Accidentes",
+    "definicion": "Proporción de detecciones realizadas por el modelo que corresponden a colisiones reales",
+    "formula": null,
+    "unidad": "Porcentaje (%)",
+    "datos_necesarios": "Conteos de Verdaderos Positivos (TP) y Falsos Positivos (FP).",
+    "metodo_evaluacion": "Matriz de confusión sobre dataset de video validado.",
+    "meta": ">= 85%"
+  },
+  {
+    "nombre": "Tasa de Falsas Alarmas",
+    "definicion": "Proporción de alertas erróneas generadas sobre el total de notificaciones emitidas al operador",
+    "formula": null,
+    "unidad": "Porcentaje (%)",
+    "datos_necesarios": "Registro de alertas descartadas manualmente o por el filtro lógico.",
+    "metodo_evaluacion": "Análisis del log de verificaciones en dashboard.",
+    "meta": "<= 15%"
+  },
+  {
+    "nombre": "Porcentaje de Eventos Correctamente Clasificados",
+    "definicion": "Proporción de accidentes cuya categoría de gravedad (Leve, Moderada, Grave) coincide con la etiqueta de referencia",
+    "formula": null,
+    "unidad": "Porcentaje (%)",
+    "datos_necesarios": "Etiquetas de gravedad esperadas vs. clasificadas por el sistema.",
+    "metodo_evaluacion": "Prueba cruzada sobre dataset etiquetado manualmente.",
+    "meta": ">= 80%"
+  },
+  {
+    "nombre": "Tiempo Total de Detección",
+    "definicion": "Tiempo transcurrido desde que ocurre el impacto observable en cámara hasta que el algoritmo identifica el evento",
+    "formula": null,
+    "unidad": "Segundos (s)",
+    "datos_necesarios": "Timestamp del fotograma del choque vs. timestamp del bounding box.",
+    "metodo_evaluacion": "Análisis de marcas de tiempo cuadro a cuadro en video.",
+    "meta": "<= 5s"
+  }
+]
